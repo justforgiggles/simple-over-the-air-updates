@@ -11,8 +11,8 @@
 #ifdef ARDUINO
 #include <Arduino.h>
 #include <WiFi.h>
-constexpr char WIFI_SSID[] = "your-wifi-name";
-constexpr char WIFI_PASSWORD[] = "your-wifi-password";
+constexpr char WIFI_SSID[] = "WR7010-2.4G-82E";
+constexpr char WIFI_PASSWORD[] = "12345678";
 constexpr char BUNDLE_URL[] = "https://raw.githubusercontent.com/justforgiggles/simple-over-the-air-updates/main/bundle";
 // Retry delay only: the first installation attempt runs immediately in loop().
 constexpr unsigned long UPDATE_INTERVAL_MS = 60 * 1000;
