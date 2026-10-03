@@ -1,0 +1,7 @@
+.pio/
+.env
+firmware/include/config.h
+dist/
+releases/
+.DS_Store
+sdkconfig.esp32c3*

@@ -1,0 +1,25 @@
+services:
+  sotau:
+    build: .
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./releases:/releases:ro
+    networks:
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "${TRAEFIK_NETWORK:-traefik}"
+      traefik.http.routers.sotau.rule: "Host(`${UPDATE_HOST:-sotau.barenderasmus.com}`) && Path(`/firmware`)"
+      traefik.http.routers.sotau.entrypoints: "${TRAEFIK_ENTRYPOINT:-websecure}"
+      traefik.http.routers.sotau.tls: "true"
+      traefik.http.routers.sotau.tls.certresolver: "${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      traefik.http.services.sotau.loadbalancer.server.port: "8080"
+
+networks:
+  traefik:
+    external: true
+    name: "${TRAEFIK_NETWORK:-traefik}"
