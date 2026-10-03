@@ -11,6 +11,8 @@
 #ifdef ARDUINO
 #include <Arduino.h>
 #include <WiFi.h>
+// Print failures even when Arduino Core Debug Level is set to None.
+#define OTA_ERROR(format, ...) Serial.printf("OTA: " format "\n", ##__VA_ARGS__)
 constexpr char WIFI_SSID[] = "WR7010-2.4G-82E";
 constexpr char WIFI_PASSWORD[] = "12345678";
 constexpr char BUNDLE_URL[] = "https://raw.githubusercontent.com/justforgiggles/simple-over-the-air-updates/main/bundle";
@@ -26,6 +28,7 @@ constexpr unsigned long APP_WATCHDOG_SECONDS = 30;
 #include "config.example.h"
 #endif
 #include "esp_crt_bundle.h"
+#define OTA_ERROR(format, ...) ESP_LOGE("ota", format, ##__VA_ARGS__)
 #endif
 
 #include <algorithm>
@@ -184,6 +187,7 @@ struct Request {
 
     bool open(const char* filename) {
         if (strncmp(BUNDLE_URL, "https://", 8) != 0) {
+            OTA_ERROR("Bundle URL must use HTTPS");
             return false;
         }
         const std::string url = std::string(BUNDLE_URL) + "/" + filename;
@@ -198,24 +202,37 @@ struct Request {
         config.disable_auto_redirect = true;
         client = esp_http_client_init(&config);
         if (!client) {
+            OTA_ERROR("Cannot allocate HTTP client for %s", filename);
             return false;
         }
         esp_http_client_set_header(client, "Connection", "close");
         esp_http_client_set_header(client, "Accept-Encoding", "identity");
         ESP_ERROR_CHECK(esp_task_wdt_reset());
-        if (esp_http_client_open(client, 0) != ESP_OK) {
+        const esp_err_t error = esp_http_client_open(client, 0);
+        if (error != ESP_OK) {
+            OTA_ERROR("GET %s failed: %s (DNS, connection or TLS)", url.c_str(), esp_err_to_name(error));
             return false;
         }
         ESP_ERROR_CHECK(esp_task_wdt_reset());
         length = esp_http_client_fetch_headers(client);
-        return length >= 0 && esp_http_client_get_status_code(client) == 200 &&
-               !esp_http_client_is_chunked_response(client);
+        const int status = esp_http_client_get_status_code(client);
+        const bool chunked = esp_http_client_is_chunked_response(client);
+        if (length < 0 || status != 200 || chunked) {
+            OTA_ERROR("GET %s: HTTP %d, length %lld, chunked %d; require HTTP 200 and Content-Length",
+                      url.c_str(), status, static_cast<long long>(length), chunked);
+            return false;
+        }
+        return true;
     }
 };
 
 bool fetchChecksum(char output[65]) {
     Request request;
-    if (!request.open("firmware.sha256") || request.length != 65) {
+    if (!request.open("firmware.sha256")) {
+        return false;
+    }
+    if (request.length != 65) {
+        OTA_ERROR("Checksum length is %lld; expected 65", static_cast<long long>(request.length));
         return false;
     }
     char body[65];
@@ -224,32 +241,46 @@ bool fetchChecksum(char output[65]) {
     while (received < sizeof(body)) {
         const auto elapsed = milliseconds() - start;
         if (elapsed >= NETWORK_TIMEOUT_MS) {
+            OTA_ERROR("Checksum download timed out");
             return false;
         }
         esp_http_client_set_timeout_ms(request.client, NETWORK_TIMEOUT_MS - elapsed);
         int count = esp_http_client_read(request.client, body + received, sizeof(body) - received);
         if (count <= 0) {
+            OTA_ERROR("Checksum read failed (%d), received %u/65 bytes", count, static_cast<unsigned>(received));
             return false;
         }
         received += count;
     }
-    return esp_http_client_is_complete_data_received(request.client) &&
-           parseChecksum(body, sizeof(body), output);
+    if (!esp_http_client_is_complete_data_received(request.client) ||
+        !parseChecksum(body, sizeof(body), output)) {
+        OTA_ERROR("Invalid checksum body; expected 64 lowercase hex digits and a newline");
+        return false;
+    }
+    return true;
 }
 
 bool install(const char* expected) {
     const auto start = milliseconds();
     Request request;
-    if (!layoutCompatible() || !request.open("firmware.bin")) {
+    if (!layoutCompatible()) {
+        OTA_ERROR("Incompatible OTA partition layout");
+        return false;
+    }
+    if (!request.open("firmware.bin")) {
         return false;
     }
     const esp_partition_t* target = esp_ota_get_next_update_partition(nullptr);
     if (!target || request.length <= 0 || request.length > target->size) {
+        OTA_ERROR("Firmware length %lld does not fit OTA slot (%lu bytes)",
+                  static_cast<long long>(request.length), static_cast<unsigned long>(target ? target->size : 0));
         return false;
     }
     esp_ota_handle_t update;
     ESP_ERROR_CHECK(esp_task_wdt_reset());
-    if (esp_ota_begin(target, request.length, &update) != ESP_OK) {
+    esp_err_t error = esp_ota_begin(target, request.length, &update);
+    if (error != ESP_OK) {
+        OTA_ERROR("Starting flash update failed: %s", esp_err_to_name(error));
         return false;
     }
     int64_t received = 0;
@@ -264,7 +295,15 @@ bool install(const char* expected) {
             std::min<uint64_t>(NETWORK_TIMEOUT_MS, DOWNLOAD_TIMEOUT_MS - elapsed));
         int count = esp_http_client_read(request.client, buffer,
             std::min<int64_t>(sizeof(buffer), request.length - received));
-        if (count <= 0 || esp_ota_write(update, buffer, count) != ESP_OK) {
+        if (count <= 0) {
+            OTA_ERROR("Firmware read failed (%d) after %lld/%lld bytes", count,
+                      static_cast<long long>(received), static_cast<long long>(request.length));
+            esp_ota_abort(update);
+            return false;
+        }
+        error = esp_ota_write(update, buffer, count);
+        if (error != ESP_OK) {
+            OTA_ERROR("Flash write failed: %s", esp_err_to_name(error));
             esp_ota_abort(update);
             return false;
         }
@@ -273,20 +312,27 @@ bool install(const char* expected) {
     }
     if (received != request.length || milliseconds() - start >= DOWNLOAD_TIMEOUT_MS ||
         !esp_http_client_is_complete_data_received(request.client)) {
+        OTA_ERROR("Firmware download incomplete or timed out: %lld/%lld bytes",
+                  static_cast<long long>(received), static_cast<long long>(request.length));
         esp_ota_abort(update);
         return false;
     }
     // Validates chip/image structure and frees the handle, including on failure.
-    if (esp_ota_end(update) != ESP_OK) {
+    error = esp_ota_end(update);
+    if (error != ESP_OK) {
+        OTA_ERROR("Firmware image validation failed: %s", esp_err_to_name(error));
         return false;
     }
     char actual[65];
     uint32_t imageSize = 0;
     if (!imageChecksum(target, actual, &imageSize) || imageSize != request.length ||
         strcmp(actual, expected) != 0) {
+        OTA_ERROR("Firmware verification failed: image size or SHA-256 differs from published bundle");
         return false;
     }
-    if (esp_ota_set_boot_partition(target) != ESP_OK) {
+    error = esp_ota_set_boot_partition(target);
+    if (error != ESP_OK) {
+        OTA_ERROR("Selecting new boot partition failed: %s", esp_err_to_name(error));
         return false;
     }
     ESP_LOGI("ota", "Verified %s; rebooting", actual);
@@ -325,8 +371,12 @@ void loop() {
             delay(100);
         }
         char checksum[65];
-        if (WiFi.status() == WL_CONNECTED && time(nullptr) >= 1704067200 &&
-            ota::fetchChecksum(checksum)) {
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.printf("Wi-Fi connection failed: status %d; check credentials, 2.4 GHz signal and antenna.\n",
+                          static_cast<int>(WiFi.status()));
+        } else if (time(nullptr) < 1704067200) {
+            Serial.println("Clock sync pending: NTP (UDP 123) must be reachable for HTTPS verification.");
+        } else if (ota::fetchChecksum(checksum)) {
             Serial.println("Installing firmware...");
             ota::install(checksum);
         }

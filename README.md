@@ -81,6 +81,14 @@ Publish a configured bundle before sending the installer. The installer is a
 one-time application, not a permanent recovery bootloader; the downloaded
 application provides subsequent updates and recovery.
 
+If the installer prints `Installation incomplete; retrying in 60 seconds`,
+read the preceding error at 115200 baud. It identifies Wi-Fi connection or NTP
+clock sync failures, the failing HTTP URL/status, or download/flash validation
+errors. These diagnostics work with Arduino's **Core Debug Level: None**.
+For DNS/TLS failures, select **Core Debug Level: Verbose** and upload again to
+include Espressif's connection diagnostics. HTTP 404 means the configured public
+repository, branch or bundle file is unavailable; publish both bundle files.
+
 Arduino's stock bootloader may return to the installer if the very first
 application fails before reaching startup. The application confirms this first
 handoff immediately. Subsequent updates are written by ESP-IDF with rollback
