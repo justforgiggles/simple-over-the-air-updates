@@ -1,6 +1,6 @@
 # Simple over-the-air updates
 
-ESP32-C3 firmware that updates itself from this public GitHub repository. Build
+ESP-32U (original ESP32) firmware that updates itself from this public GitHub repository. Build
 with PlatformIO, commit the application and checksum, and push. No update server
 or deployment service is needed.
 
@@ -8,7 +8,7 @@ or deployment service is needed.
 
 ```sh
 cp firmware/include/config.example.h firmware/include/config.h
-# Edit config.h: Wi-Fi credentials and, if using a fork, BUNDLE_URL.
+# Edit config.h: Wi-Fi credentials, LED pin/polarity, and (for a fork) BUNDLE_URL.
 pio run
 python3 tools/test_bundle.py
 ```
@@ -16,6 +16,12 @@ python3 tools/test_bundle.py
 Edit `firmware/src/application.cpp` for your application. `applicationSetup()` runs
 once and `applicationLoop()` runs repeatedly, separately from the updater task.
 Each call must return within the 30-second watchdog period.
+The example flashes a conventional LED: 500 ms on, 500 ms off. `LED_GPIO` defaults
+to GPIO2 and `LED_ACTIVE_HIGH` to true; confirm both against the carrier board's
+wiring. The photo identifies the ESP-32U module but does not show the LED circuit.
+Set `LED_GPIO = -1` to disable LED output if the board only has a power LED or the
+pin is used elsewhere. GPIO6–11, including the previous C3 LED pin GPIO8, are
+reserved for the original ESP32's flash and are rejected as LED pins.
 
 Every `pio run` exports these files, ready to commit:
 
@@ -63,8 +69,8 @@ no files from this repository or third-party libraries need to accompany it.
    default sketch, and save it as `Bootstrap` (creating `Bootstrap/Bootstrap.ino`).
 3. Edit `WIFI_SSID`, `WIFI_PASSWORD`, and, for a fork, `BUNDLE_URL` near the top.
    Verify the hosted application was built with suitable credentials too.
-4. Select **ESP32C3 Dev Module**, **4MB flash**, and **Minimal SPIFFS (1.9MB APP
-   with OTA)**. Use **USB CDC On Boot: Disabled** for the DevKitM-1 UART connection.
+4. Select **ESP32 Dev Module**, **4MB flash**, **DIO**, **40MHz flash frequency**,
+   and **Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)**.
    For initial provisioning over an existing sketch, select **Erase All Flash
    Before Sketch Upload: Enabled**; this clears previous application and OTA state.
 5. Select the serial port and upload. Open Serial Monitor at **115200 baud**.
@@ -82,7 +88,9 @@ disabled; they do not require a trial boot or revert to an older application.
 
 ## Update and recovery behavior
 
-The application checks the checksum at startup and 60 seconds after each attempt.
+The application checks the checksum at startup and 60 minutes after each attempt,
+including in recovery mode. The installer attempts immediately once Wi-Fi and
+time synchronization are ready; only failed installer attempts wait 60 seconds.
 It hashes its running image directly, including the appended image digest, so
 there is no separately saved version that can drift out of sync. When the hosted
 checksum differs, it downloads to the inactive OTA slot and validates the chip,
@@ -119,6 +127,14 @@ redundant OTA metadata.
 
 ## PlatformIO USB provisioning and compatibility
 
+The `esp32u` PlatformIO environment uses the `esp32dev` board target: original
+dual-core Xtensa ESP32, DIO flash at 40 MHz, and a 4 MB flash layout. The ESP-32U
+module and VP/VN/34/35 pin labels in `image.png` identify this processor family;
+the photo does not establish flash capacity. Confirm at least 4 MB on the actual
+device before provisioning. Attach the external 2.4 GHz antenna to the module's
+antenna connector for reliable Wi-Fi. The application uses Wi-Fi only; Bluetooth
+features are not needed for OTA.
+
 The application uses ESP-IDF 5.3.1 and the same `min_spiffs` layout as the Arduino
 installer. Both slots are `0x1E0000` bytes; the updater checks the device's actual
 layout before installation. Keep the bootloader/partition layout fixed across OTA
@@ -134,6 +150,9 @@ pio device monitor
 
 Devices flashed with this project's earlier custom partition layout must be
 reprovisioned over USB. OTA updates do not rewrite partitions or the bootloader.
+The current bundle targets the original ESP32 only. Earlier ESP32-C3 bundles are
+not compatible with this module; the installer rejects the wrong build target
+and the bundle tests reject ESP32-C3 images.
 
 ## Validation
 
@@ -153,11 +172,13 @@ To check the customer sketch using Arduino CLI:
 arduino-cli core install esp32:esp32@3.1.3 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 mkdir -p /tmp/sotau-sketch/Bootstrap
 cp bootstrap.cpp /tmp/sotau-sketch/Bootstrap/Bootstrap.ino
-arduino-cli compile --fqbn esp32:esp32:esp32c3:PartitionScheme=min_spiffs,FlashSize=4M /tmp/sotau-sketch/Bootstrap
+arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs,FlashSize=4M,FlashMode=dio,FlashFreq=40 /tmp/sotau-sketch/Bootstrap
 ```
 
 Physical-device acceptance remains necessary:
 
+- Confirm flash capacity and the LED pin/polarity; verify the LED blinks without
+  affecting Wi-Fi. A power-only LED cannot be controlled by firmware.
 - Install through Arduino, verify the first application starts, then reboot twice
   to check the initial confirmation. Repeat initial installation with power loss.
 - Publish unchanged bytes, then A → B → A; verify only changed content installs.
@@ -170,4 +191,5 @@ Physical-device acceptance remains necessary:
 
 References: [Arduino sketches](https://docs.arduino.cc/arduino-cli/sketch-specification),
 [Arduino OTA partition layout](https://github.com/espressif/arduino-esp32/blob/3.1.3/tools/partitions/min_spiffs.csv),
-[ESP-IDF OTA](https://docs.espressif.com/projects/esp-idf/en/v5.3.1/esp32c3/api-reference/system/ota.html).
+[ESP-IDF OTA](https://docs.espressif.com/projects/esp-idf/en/v5.3.1/esp32/api-reference/system/ota.html),
+[ESP32 GPIO restrictions](https://docs.espressif.com/projects/esp-idf/en/v5.3.1/esp32/api-reference/peripherals/gpio.html).

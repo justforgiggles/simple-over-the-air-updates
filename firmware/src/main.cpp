@@ -173,7 +173,7 @@ extern "C" void app_main() {
     ESP_ERROR_CHECK(nvs_flash_init());
     esp_task_wdt_config_t watchdog = {};
     watchdog.timeout_ms = APP_WATCHDOG_SECONDS * 1000;
-    watchdog.idle_core_mask = 1;
+    watchdog.idle_core_mask = (1U << portNUM_PROCESSORS) - 1;
     watchdog.trigger_panic = true;
     ESP_ERROR_CHECK(esp_task_wdt_reconfigure(&watchdog));
     ESP_ERROR_CHECK(esp_task_wdt_add(nullptr));

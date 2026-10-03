@@ -3,4 +3,4 @@ firmware/include/config.h
 dist/
 .DS_Store
 __pycache__/
-sdkconfig.esp32c3*
+sdkconfig.esp32*

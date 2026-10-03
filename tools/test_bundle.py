@@ -15,8 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def validate_image(data):
     if not 32 <= len(data) <= MAX_IMAGE_SIZE:
         raise ValueError("invalid image size")
-    if data[0] != 0xE9 or struct.unpack_from("<H", data, 12)[0] != 5 or data[23] != 1:
-        raise ValueError("expected ESP32-C3 image with appended SHA-256")
+    if data[0] != 0xE9 or struct.unpack_from("<H", data, 12)[0] != 0 or data[23] != 1:
+        raise ValueError("expected original ESP32 image with appended SHA-256")
     if struct.unpack_from("<I", data, 32)[0] != 0xABCD5432:
         raise ValueError("expected application image, not bootloader")
     offset = 24
@@ -89,6 +89,10 @@ int main() {
         validate_image(data)
         checksum = (ROOT / "bundle/firmware.sha256").read_bytes()
         self.assertEqual(checksum, (hashlib.sha256(data).hexdigest() + "\n").encode())
+        wrong_chip = bytearray(data)
+        struct.pack_into("<H", wrong_chip, 12, 5)  # ESP32-C3 must not be published here.
+        with self.assertRaisesRegex(ValueError, "original ESP32"):
+            validate_image(wrong_chip)
         for bad in (data[:-1], data + b"padding", data[:100] + b"broken" + data[106:]):
             with self.assertRaises(ValueError):
                 validate_image(bad)

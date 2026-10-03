@@ -1,6 +1,6 @@
 // Customer installer: paste this whole file into a new Arduino IDE sketch.
-// Board package: esp32 by Espressif Systems 3.1.3; board: ESP32C3 Dev Module.
-// Flash: 4 MB; Partition Scheme: Minimal SPIFFS (1.9MB APP with OTA).
+// Board package: esp32 by Espressif Systems 3.1.3; board: ESP32 Dev Module (ESP-32U).
+// Flash: 4 MB, DIO, 40 MHz; Partition Scheme: Minimal SPIFFS (1.9MB APP with OTA).
 // Edit credentials below to match those compiled into the published firmware.
 // Upload by USB. This installer is replaced by the first verified application.
 
@@ -14,6 +14,7 @@
 constexpr char WIFI_SSID[] = "your-wifi-name";
 constexpr char WIFI_PASSWORD[] = "your-wifi-password";
 constexpr char BUNDLE_URL[] = "https://raw.githubusercontent.com/justforgiggles/simple-over-the-air-updates/main/bundle";
+// Retry delay only: the first installation attempt runs immediately in loop().
 constexpr unsigned long UPDATE_INTERVAL_MS = 60 * 1000;
 constexpr unsigned long NETWORK_TIMEOUT_MS = 10 * 1000;
 constexpr unsigned long DOWNLOAD_TIMEOUT_MS = 120 * 1000;
@@ -40,6 +41,10 @@ constexpr unsigned long APP_WATCHDOG_SECONDS = 30;
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mbedtls/sha256.h"
+
+#if !CONFIG_IDF_TARGET_ESP32
+#error "Select ESP32 Dev Module: this bundle is for the original ESP32/ESP-32U, not ESP32-C3/S3."
+#endif
 
 static_assert(NETWORK_TIMEOUT_MS > 0 && NETWORK_TIMEOUT_MS < APP_WATCHDOG_SECONDS * 1000,
               "Network timeout must be positive and shorter than the watchdog timeout");
@@ -296,7 +301,7 @@ void setup() {
     Serial.begin(115200);
     esp_task_wdt_config_t watchdog = {};
     watchdog.timeout_ms = APP_WATCHDOG_SECONDS * 1000;
-    watchdog.idle_core_mask = 1;
+    watchdog.idle_core_mask = (1U << portNUM_PROCESSORS) - 1;
     watchdog.trigger_panic = true;
     ESP_ERROR_CHECK(esp_task_wdt_reconfigure(&watchdog));
     ESP_ERROR_CHECK(esp_task_wdt_add(nullptr));
