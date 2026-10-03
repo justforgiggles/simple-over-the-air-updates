@@ -1,0 +1,2 @@
+bundle/firmware.bin binary -filter
+bundle/firmware.sha256 text eol=lf

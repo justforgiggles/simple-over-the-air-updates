@@ -1,5 +1,0 @@
-*
-!Dockerfile
-!server/
-!server/*.go
-!server/go.mod

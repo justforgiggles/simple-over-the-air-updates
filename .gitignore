@@ -1,7 +1,6 @@
 .pio/
-.env
 firmware/include/config.h
 dist/
-releases/
 .DS_Store
+__pycache__/
 sdkconfig.esp32c3*
