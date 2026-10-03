@@ -77,6 +77,8 @@ no files from this repository or third-party libraries need to accompany it.
 
 The installer connects to Wi-Fi, synchronizes time, downloads and verifies the
 first application, then reboots into it. Failed attempts retry every 60 seconds.
+Clock synchronization starts after Wi-Fi connects and has its own 30-second
+timeout, with the watchdog fed throughout the wait.
 Publish a configured bundle before sending the installer. The installer is a
 one-time application, not a permanent recovery bootloader; the downloaded
 application provides subsequent updates and recovery.

@@ -11,6 +11,7 @@
 #ifdef ARDUINO
 #include <Arduino.h>
 #include <WiFi.h>
+#include "esp_wifi.h"
 // Print failures even when Arduino Core Debug Level is set to None.
 #define OTA_ERROR(format, ...) Serial.printf("OTA: " format "\n", ##__VA_ARGS__)
 constexpr char WIFI_SSID[] = "WR7010-2.4G-82E";
@@ -19,6 +20,7 @@ constexpr char BUNDLE_URL[] = "https://raw.githubusercontent.com/justforgiggles/
 // Retry delay only: the first installation attempt runs immediately in loop().
 constexpr unsigned long UPDATE_INTERVAL_MS = 60 * 1000;
 constexpr unsigned long NETWORK_TIMEOUT_MS = 10 * 1000;
+constexpr unsigned long CLOCK_SYNC_TIMEOUT_MS = 30 * 1000;
 constexpr unsigned long DOWNLOAD_TIMEOUT_MS = 120 * 1000;
 constexpr unsigned long APP_WATCHDOG_SECONDS = 30;
 #else
@@ -353,8 +355,8 @@ void setup() {
     ESP_ERROR_CHECK(esp_task_wdt_add(nullptr));
     WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
+    // loop() owns connection attempts; do not race an automatic reconnect.
+    WiFi.setAutoReconnect(false);
 }
 
 void loop() {
@@ -363,12 +365,26 @@ void loop() {
         Serial.println("Select Minimal SPIFFS (1.9MB APP with OTA), then upload again.");
     } else {
         if (WiFi.status() != WL_CONNECTED) {
-            WiFi.reconnect();
+            // Arduino disconnect() does not cancel an association still in progress.
+            esp_wifi_disconnect();
+            WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
         }
         const auto start = ota::milliseconds();
-        while ((WiFi.status() != WL_CONNECTED || time(nullptr) < 1704067200) &&
+        while (WiFi.status() != WL_CONNECTED &&
                ota::milliseconds() - start < NETWORK_TIMEOUT_MS) {
+            ESP_ERROR_CHECK(esp_task_wdt_reset());
             delay(100);
+        }
+        if (WiFi.status() == WL_CONNECTED && time(nullptr) < 1704067200) {
+            Serial.printf("Wi-Fi connected: IP %s; synchronizing clock...\n", WiFi.localIP().toString().c_str());
+            // Start/restart NTP only once DNS and the network are available.
+            configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
+            const auto clockStart = ota::milliseconds();
+            while (WiFi.status() == WL_CONNECTED && time(nullptr) < 1704067200 &&
+                   ota::milliseconds() - clockStart < CLOCK_SYNC_TIMEOUT_MS) {
+                ESP_ERROR_CHECK(esp_task_wdt_reset());
+                delay(100);
+            }
         }
         char checksum[65];
         if (WiFi.status() != WL_CONNECTED) {

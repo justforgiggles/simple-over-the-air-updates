@@ -103,7 +103,6 @@ void startWifi() {
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_setservername(1, "time.cloudflare.com");
-    esp_sntp_init();
 }
 
 bool networkReady() {
@@ -122,15 +121,22 @@ bool networkReady() {
         ESP_LOGW(TAG, "Wi-Fi unavailable; retrying next cycle");
         return false;
     }
+    if (!esp_sntp_enabled() || time(nullptr) < 1704067200) {
+        // Start/restart NTP after obtaining an IP, not while Wi-Fi is offline.
+        if (esp_sntp_enabled()) {
+            esp_sntp_stop();
+        }
+        esp_sntp_init();
+    }
     const auto start = milliseconds();
-    while (time(nullptr) < 1704067200 && milliseconds() - start < NETWORK_TIMEOUT_MS) {
+    while (connected && time(nullptr) < 1704067200 && milliseconds() - start < 30000) {
         pauseFor(100);
     }
     if (time(nullptr) < 1704067200) {
         ESP_LOGW(TAG, "Waiting for time synchronization before TLS; retrying next cycle");
         return false;
     }
-    return true;
+    return connected;
 }
 
 void checkForUpdate() {
