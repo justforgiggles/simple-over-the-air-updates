@@ -10,6 +10,7 @@
 #include "esp_netif.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -24,7 +25,7 @@ namespace {
 constexpr char TAG[] = "audio";
 constexpr char RELAY_HOST[] = "sonic.barenderasmus.com";
 constexpr char RELAY_PORT[] = "9000";
-constexpr uint32_t SAMPLE_RATE = 16000;
+constexpr uint32_t SAMPLE_RATE = 8000;
 constexpr size_t FRAME_SAMPLES = 320;
 // Lower shift increases gain. Tune against the reported peak (maximum 32768).
 constexpr unsigned MIC_SHIFT = 14;
@@ -35,7 +36,7 @@ struct Frame {
 };
 QueueHandle_t frames = nullptr;
 TaskHandle_t capture = nullptr, transmitter = nullptr;
-std::atomic<uint32_t> dropped{0}, sent{0}, peak{0};
+std::atomic<uint32_t> dropped{0}, sent{0}, peak{0}, reconnects{0};
 
 int64_t milliseconds() { return esp_timer_get_time() / 1000; }
 
@@ -132,7 +133,7 @@ void captureTask(void*) {
     }
 }
 
-// A single deadline covers all partial writes of a frame, preventing a slow
+// A single deadline covers all partial writes of a batch, preventing a slow
 // receiver from retaining stale audio indefinitely. Sockets stay nonblocking.
 bool waitWritable(int socket, int64_t deadline) {
     while (networkUp()) {
@@ -153,7 +154,7 @@ bool waitWritable(int socket, int64_t deadline) {
 }
 
 bool writeAll(int socket, const uint8_t* bytes, size_t size) {
-    const auto deadline = milliseconds() + 1000;
+    const auto deadline = milliseconds() + 3000;
     while (size) {
         if (!waitWritable(socket, deadline)) {
             const int error = errno;
@@ -209,25 +210,37 @@ int connectRelay() {
     return connectedSocket;
 }
 
+// Two wire frames per write; a lone frame is flushed after at most 80 ms.
+size_t readBatch(Frame (&batch)[2]) {
+    if (xQueueReceive(frames, &batch[0], pdMS_TO_TICKS(100)) != pdTRUE) return 0;
+    return xQueueReceive(frames, &batch[1], pdMS_TO_TICKS(80)) == pdTRUE ? 2 : 1;
+}
+
+unsigned nextRetry(unsigned delayMs) { return delayMs < 8000 ? delayMs * 2 : 8000; }
+
 void transmitTask(void*) {
     ESP_ERROR_CHECK(esp_task_wdt_add(nullptr));
+    unsigned retryMs = 1000;
     for (;;) {
         if (!networkUp()) { pauseFor(1000); continue; }
         const int socket = connectRelay();
         if (socket < 0) {
-            ESP_LOGW(TAG, "Relay unavailable; retrying in 1s");
-            pauseFor(1000);
+            ++reconnects;
+            ESP_LOGW(TAG, "Relay unavailable; retrying in %ums", retryMs);
+            pauseFor(retryMs);
+            retryMs = nextRetry(retryMs);
             continue;
         }
         discardFrames();
-        ESP_LOGI(TAG, "TCP connected; sending SB01 continuous 16kHz mono mu-law to %s:%s", RELAY_HOST, RELAY_PORT);
-        auto lastFrame = milliseconds();
+        ESP_LOGI(TAG, "TCP connected; sending SB01 %luHz mono mu-law to %s:%s",
+                 static_cast<unsigned long>(SAMPLE_RATE), RELAY_HOST, RELAY_PORT);
+        const auto connectedAt = milliseconds();
+        auto lastFrame = connectedAt;
         while (networkUp()) {
             ESP_ERROR_CHECK(esp_task_wdt_reset());
-            Frame frame;
-            if (xQueueReceive(frames, &frame, pdMS_TO_TICKS(100)) != pdTRUE) {
-                // Release the source slot if capture fails, rather than leaving
-                // the relay holding a silent connection until its timeout.
+            Frame batch[2];
+            const size_t count = readBatch(batch);
+            if (!count) {
                 if (milliseconds() - lastFrame >= 2000) {
                     ESP_LOGW(TAG, "No microphone frames for 2s; closing stream");
                     break;
@@ -235,15 +248,20 @@ void transmitTask(void*) {
                 continue;
             }
             lastFrame = milliseconds();
-            // SB01 carries raw fixed-size mu-law frames. Both old and new
-            // relays accept it; SB02 record headers would become audible noise.
-            if (!writeAll(socket, frame.audio, sizeof(frame.audio))) break;
-            ++sent;
+            // SB01 has no per-frame prefix. Coalescing frames preserves the wire.
+            if (!writeAll(socket, reinterpret_cast<const uint8_t*>(batch), count * sizeof(Frame))) {
+                dropped += count;
+                break;
+            }
+            sent += count;
+            if (milliseconds() - connectedAt >= 30000) retryMs = 1000;
         }
-        close(socket); // Never continue a partially written frame on a new session.
+        close(socket); // A failed partial batch is never resumed on another connection.
         discardFrames();
-        ESP_LOGW(TAG, "Stream disconnected; retrying in 1s");
-        pauseFor(1000);
+        ++reconnects;
+        ESP_LOGW(TAG, "Stream disconnected; retrying in %ums", retryMs);
+        pauseFor(retryMs);
+        retryMs = nextRetry(retryMs);
     }
 }
 
@@ -269,6 +287,12 @@ void applicationLoop() {
     if (now - lastStatus < 5000) return;
     lastStatus = now;
     startTasks();
-    ESP_LOGI(TAG, "last_5s sent=%lu dropped=%lu peak=%lu", static_cast<unsigned long>(sent.exchange(0)),
-             static_cast<unsigned long>(dropped.exchange(0)), static_cast<unsigned long>(peak.load()));
+    wifi_ap_record_t ap = {};
+    const int rssi = esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0;
+    const auto frameCount = sent.exchange(0);
+    const auto droppedCount = dropped.exchange(0);
+    ESP_LOGI(TAG, "last_5s sent=%lu audio_bytes=%lu dropped_ms=%lu reconnects=%lu peak=%lu rssi=%d",
+             static_cast<unsigned long>(frameCount), static_cast<unsigned long>(frameCount * FRAME_SAMPLES),
+             static_cast<unsigned long>(droppedCount * FRAME_SAMPLES * 1000 / SAMPLE_RATE),
+             static_cast<unsigned long>(reconnects.exchange(0)), static_cast<unsigned long>(peak.load()), rssi);
 }

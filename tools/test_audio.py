@@ -20,8 +20,8 @@ class AudioTests(unittest.TestCase):
 #include "sonic_wire.h"
 int main() {
     uint8_t header[sonic::kHeaderBytes];
-    assert(sonic::buildStreamHeader(header, sonic::kCodecMulaw, 16000, 320) == 12);
-    const uint8_t expected[] = {'S', 'B', '0', '1', 1, 1, 0x40, 1, 0x80, 0x3e, 0, 0};
+    assert(sonic::buildStreamHeader(header, sonic::kCodecMulaw, 8000, 320) == 12);
+    const uint8_t expected[] = {'S', 'B', '0', '1', 1, 1, 0x40, 1, 0x40, 0x1f, 0, 0};
     assert(memcmp(header, expected, sizeof(expected)) == 0);
     // Continuous SB01 payload: exactly 320 mu-law bytes, no record prefix.
     int16_t silence[320] = {};

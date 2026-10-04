@@ -12,6 +12,7 @@ cp firmware/include/config.example.h firmware/include/config.h
 pio run
 python3 tools/test_bundle.py
 python3 tools/test_audio.py
+python3 tools/test_streaming.py
 python3 tools/test_download.py
 ```
 
@@ -20,7 +21,7 @@ once and `applicationLoop()` runs repeatedly, separately from the updater task.
 Each call must return within the 30-second watchdog period.
 The application streams an INMP441 microphone continuously to
 `sonic.barenderasmus.com:9000` over plain TCP, using Sonic Bridge's SB01 protocol (supported by old and new relays):
-16 kHz mono μ-law, 320 samples (20 ms) per frame. Silence is transmitted too.
+8 kHz mono μ-law, 320 samples (40 ms) per frame, using 64 kbps of audio payload. Silence is transmitted too.
 The relay accepts one source at a time; stop any other source before testing.
 
 Wire the microphone to the **original ESP32/ESP-32U**, not an ESP32-C3:
@@ -35,10 +36,12 @@ Wire the microphone to the **original ESP32/ESP-32U**, not an ESP32-C3:
 | SD | GPIO33 |
 
 Capture and TCP transmission run in separate tasks. The 16-frame queue holds
-at most 320 ms of audio and drops oldest frames when full. Connection attempts
-have a five-second TCP deadline and each frame has a one-second write deadline;
-DNS uses lwIP's bounded retries. Failed connections retry after one second,
-resolve the hostname again, and discard buffered audio before resuming.
+at most 640 ms of audio and drops oldest frames when full. Connection attempts
+have a five-second TCP deadline and each batch has a three-second write deadline;
+DNS uses lwIP's bounded retries. Two frames share each TCP write (640 bytes),
+with a lone frame flushed after at most 80 ms. Failed connections retry after
+1, 2, 4, then 8 seconds; 30 seconds of successful streaming resets the backoff.
+Retries resolve the hostname again and discard buffered audio before resuming.
 Wi-Fi connection attempts run every five seconds independently of OTA, and audio
 does not require clock synchronization. Power saving is disabled for lower latency.
 These bounds limit device buffering; listener and network buffering also affect
@@ -46,7 +49,8 @@ end-to-end delay, which must be measured on hardware.
 
 `firmware/src/application.cpp` contains the relay address, pins, and `MIC_SHIFT`
 (default 14). Lowering the shift increases microphone gain; raise it if samples
-clip. Serial logs report sent/dropped frames and the latest frame's peak every
+clip. Serial logs report sent frames/bytes, dropped audio duration, reconnects, Wi-Fi
+RSSI, and the latest frame's peak every
 five seconds (32768 is full scale). I2S failures retry after five seconds while
 the updater stays available. No LED output is configured by this application.
 
