@@ -80,7 +80,8 @@ void loadRecoveryState() {
 void wifiEvent(void*, esp_event_base_t base, int32_t id, void*) {
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         connected = true;
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+    } else if ((base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) ||
+               (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP)) {
         connected = false;
     }
 }
@@ -94,31 +95,46 @@ void startWifi() {
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifiEvent, nullptr));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifiEvent, nullptr));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, wifiEvent, nullptr));
     wifi_config_t wifi = {};
     memcpy(wifi.sta.ssid, WIFI_SSID, sizeof(WIFI_SSID) - 1);
     memcpy(wifi.sta.password, WIFI_PASSWORD, sizeof(WIFI_PASSWORD) - 1);
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi));
     ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_setservername(1, "time.cloudflare.com");
 }
 
+// Wi-Fi retries are independent of OTA and time synchronization.
+void wifiTask(void*) {
+    ESP_ERROR_CHECK(esp_task_wdt_add(nullptr));
+    auto lastProgress = milliseconds();
+    while (true) {
+        if (connected) {
+            lastProgress = milliseconds();
+        } else {
+            // Give association/DHCP time to finish, but cancel a stuck attempt.
+            if (milliseconds() - lastProgress >= 30000) {
+                esp_wifi_disconnect();
+                lastProgress = milliseconds();
+            }
+            const esp_err_t err = esp_wifi_connect();
+            if (err != ESP_OK) ESP_LOGW(TAG, "Wi-Fi reconnect: %s", esp_err_to_name(err));
+        }
+        pauseFor(5000);
+    }
+}
+
 bool networkReady() {
-    if (!connected) {
-        // Cancel a stale association attempt before trying again.
-        esp_wifi_disconnect();
-        if (esp_wifi_connect() != ESP_OK) {
-            return false;
-        }
-        const auto start = milliseconds();
-        while (!connected && milliseconds() - start < NETWORK_TIMEOUT_MS) {
-            pauseFor(100);
-        }
+    const auto wifiStart = milliseconds();
+    while (!connected && milliseconds() - wifiStart < NETWORK_TIMEOUT_MS) {
+        pauseFor(100);
     }
     if (!connected) {
-        ESP_LOGW(TAG, "Wi-Fi unavailable; retrying next cycle");
+        ESP_LOGW(TAG, "Wi-Fi unavailable; retrying update next cycle");
         return false;
     }
     if (!esp_sntp_enabled() || time(nullptr) < 1704067200) {
@@ -187,6 +203,8 @@ extern "C" void app_main() {
     ESP_ERROR_CHECK(ota::imageChecksum(esp_ota_get_running_partition(), runningChecksum, nullptr) ? ESP_OK : ESP_FAIL);
     loadRecoveryState();
     startWifi();
+    ESP_ERROR_CHECK(xTaskCreate(wifiTask, "wifi", 3072, nullptr, 5, nullptr) == pdPASS
+                    ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(xTaskCreate(updaterTask, "updater", 8192, nullptr, 5, nullptr) == pdPASS
                     ? ESP_OK : ESP_ERR_NO_MEM);
     if (!recoveryMode) {

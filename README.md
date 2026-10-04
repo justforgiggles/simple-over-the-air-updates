@@ -8,20 +8,46 @@ or deployment service is needed.
 
 ```sh
 cp firmware/include/config.example.h firmware/include/config.h
-# Edit config.h: Wi-Fi credentials, LED pin/polarity, and (for a fork) BUNDLE_URL.
+# Edit config.h: Wi-Fi credentials and (for a fork) BUNDLE_URL.
 pio run
 python3 tools/test_bundle.py
+python3 tools/test_audio.py
 ```
 
 Edit `firmware/src/application.cpp` for your application. `applicationSetup()` runs
 once and `applicationLoop()` runs repeatedly, separately from the updater task.
 Each call must return within the 30-second watchdog period.
-The example flashes a conventional LED: 500 ms on, 500 ms off. `LED_GPIO` defaults
-to GPIO2 and `LED_ACTIVE_HIGH` to true; confirm both against the carrier board's
-wiring. The photo identifies the ESP-32U module but does not show the LED circuit.
-Set `LED_GPIO = -1` to disable LED output if the board only has a power LED or the
-pin is used elsewhere. GPIO6–11, including the previous C3 LED pin GPIO8, are
-reserved for the original ESP32's flash and are rejected as LED pins.
+The application streams an INMP441 microphone continuously to
+`sonic.barenderasmus.com:9000` over plain TCP, using Sonic Bridge's SB02 protocol:
+16 kHz mono μ-law, 320 samples (20 ms) per frame. Silence is transmitted too.
+The relay accepts one source at a time; stop any other source before testing.
+
+Wire the microphone to the **original ESP32/ESP-32U**, not an ESP32-C3:
+
+| INMP441 | ESP32 |
+| --- | --- |
+| VDD | 3.3V |
+| GND | GND |
+| L/R | GND (left channel) |
+| SCK | GPIO32 |
+| WS | GPIO25 |
+| SD | GPIO33 |
+
+Capture and TCP transmission run in separate tasks. The 16-frame queue holds
+at most 320 ms of audio and drops oldest frames when full. Connection attempts
+have a five-second TCP deadline and each record has a one-second write deadline;
+DNS uses lwIP's bounded retries. Failed connections retry after one second,
+resolve the hostname again, and discard buffered audio before resuming.
+Wi-Fi connection attempts run every five seconds independently of OTA, and audio
+does not require clock synchronization. Power saving is disabled for lower latency.
+These bounds limit device buffering; listener and network buffering also affect
+end-to-end delay, which must be measured on hardware.
+
+`firmware/src/application.cpp` contains the relay address, pins, and `MIC_SHIFT`
+(default 14). Lowering the shift increases microphone gain; raise it if samples
+clip. Serial logs report sent/dropped frames and the latest frame's peak every
+five seconds (32768 is full scale). I2S failures retry after five seconds while
+the updater stays available. No LED output is configured by this application.
 
 Every `pio run` exports these files, ready to commit:
 
@@ -98,7 +124,7 @@ disabled; they do not require a trial boot or revert to an older application.
 
 ## Update and recovery behavior
 
-The application checks the checksum at startup and 60 minutes after each attempt,
+The application checks the checksum at startup and 10 minutes after each attempt,
 including in recovery mode. The installer attempts immediately once Wi-Fi and
 time synchronization are ready; only failed installer attempts wait 60 seconds.
 It hashes its running image directly, including the appended image digest, so
@@ -187,8 +213,8 @@ arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs,FlashSiz
 
 Physical-device acceptance remains necessary:
 
-- Confirm flash capacity and the LED pin/polarity; verify the LED blinks without
-  affecting Wi-Fi. A power-only LED cannot be controlled by firmware.
+- Confirm flash capacity and microphone wiring; verify audio streams without
+  affecting Wi-Fi or OTA checks.
 - Install through Arduino, verify the first application starts, then reboot twice
   to check the initial confirmation. Repeat initial installation with power loss.
 - Publish unchanged bytes, then A → B → A; verify only changed content installs.
@@ -203,3 +229,16 @@ References: [Arduino sketches](https://docs.arduino.cc/arduino-cli/sketch-specif
 [Arduino OTA partition layout](https://github.com/espressif/arduino-esp32/blob/3.1.3/tools/partitions/min_spiffs.csv),
 [ESP-IDF OTA](https://docs.espressif.com/projects/esp-idf/en/v5.3.1/esp32/api-reference/system/ota.html),
 [ESP32 GPIO restrictions](https://docs.espressif.com/projects/esp-idf/en/v5.3.1/esp32/api-reference/peripherals/gpio.html).
+
+## Audio hardware validation
+
+- Listen through Sonic Bridge and verify intelligible continuous audio, including
+  steady background sound, and latency below a few seconds on a healthy network.
+- Disconnect/reconnect Wi-Fi, restart the relay, make DNS unavailable, and stall a
+  TCP receiver. Confirm retries recover with fresh audio and bounded queue use.
+- Check microphone peak levels for clipping and verify failed I2S initialization
+  does not stop update checks. Check for ten-minute OTA checks during streaming,
+  then install a new bundle and verify streaming resumes after reboot.
+
+The host checks validate encoding/framing and the exported image; they cannot
+validate microphone wiring, sound quality, network recovery, or measured latency.
