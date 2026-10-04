@@ -31,7 +31,6 @@ constexpr unsigned MIC_SHIFT = 14;
 static_assert(MIC_SHIFT <= 31, "Invalid microphone shift");
 constexpr size_t QUEUE_FRAMES = 16;
 struct Frame {
-    uint64_t position;
     uint8_t audio[FRAME_SAMPLES];
 };
 QueueHandle_t frames = nullptr;
@@ -95,7 +94,6 @@ i2s_chan_handle_t startCapture() {
 void captureTask(void*) {
     ESP_ERROR_CHECK(esp_task_wdt_add(nullptr));
     int32_t slots[FRAME_SAMPLES];
-    uint64_t position = 0;
     for (;;) {
         i2s_chan_handle_t channel = startCapture();
         if (!channel) { pauseFor(5000); continue; }
@@ -114,8 +112,6 @@ void captureTask(void*) {
             if (pending < sizeof(slots)) continue;
             pending = 0;
             Frame frame;
-            frame.position = position;
-            position += FRAME_SAMPLES;
             uint32_t framePeak = 0;
             for (size_t i = 0; i < FRAME_SAMPLES; ++i) {
                 const int sample = sonic::slotToSample(slots[i], MIC_SHIFT);
@@ -136,13 +132,13 @@ void captureTask(void*) {
     }
 }
 
-// A single deadline covers all partial writes of a record, preventing a slow
+// A single deadline covers all partial writes of a frame, preventing a slow
 // receiver from retaining stale audio indefinitely. Sockets stay nonblocking.
 bool waitWritable(int socket, int64_t deadline) {
     while (networkUp()) {
         ESP_ERROR_CHECK(esp_task_wdt_reset());
         const int64_t remaining = deadline - milliseconds();
-        if (remaining <= 0) return false;
+        if (remaining <= 0) { errno = ETIMEDOUT; return false; }
         fd_set writeSet;
         FD_ZERO(&writeSet);
         FD_SET(socket, &writeSet);
@@ -152,18 +148,27 @@ bool waitWritable(int socket, int64_t deadline) {
         if (result > 0) return true;
         if (result < 0 && errno != EINTR) return false;
     }
+    errno = ENETDOWN;
     return false;
 }
 
 bool writeAll(int socket, const uint8_t* bytes, size_t size) {
     const auto deadline = milliseconds() + 1000;
     while (size) {
-        if (!waitWritable(socket, deadline)) return false;
+        if (!waitWritable(socket, deadline)) {
+            const int error = errno;
+            ESP_LOGW(TAG, "TCP write wait failed: errno=%d (%s), remaining=%u", error,
+                     strerror(error), static_cast<unsigned>(size));
+            return false;
+        }
         const int count = send(socket, bytes, size, 0);
         if (count > 0) {
             bytes += count;
             size -= count;
         } else if (count == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+            const int error = count == 0 ? ECONNRESET : errno;
+            ESP_LOGW(TAG, "TCP send failed: errno=%d (%s), remaining=%u", error,
+                     strerror(error), static_cast<unsigned>(size));
             return false;
         }
     }
@@ -215,7 +220,7 @@ void transmitTask(void*) {
             continue;
         }
         discardFrames();
-        ESP_LOGI(TAG, "Streaming continuous 16kHz mono mu-law to %s:%s", RELAY_HOST, RELAY_PORT);
+        ESP_LOGI(TAG, "TCP connected; sending SB01 continuous 16kHz mono mu-law to %s:%s", RELAY_HOST, RELAY_PORT);
         auto lastFrame = milliseconds();
         while (networkUp()) {
             ESP_ERROR_CHECK(esp_task_wdt_reset());
@@ -223,17 +228,19 @@ void transmitTask(void*) {
             if (xQueueReceive(frames, &frame, pdMS_TO_TICKS(100)) != pdTRUE) {
                 // Release the source slot if capture fails, rather than leaving
                 // the relay holding a silent connection until its timeout.
-                if (milliseconds() - lastFrame >= 2000) break;
+                if (milliseconds() - lastFrame >= 2000) {
+                    ESP_LOGW(TAG, "No microphone frames for 2s; closing stream");
+                    break;
+                }
                 continue;
             }
             lastFrame = milliseconds();
-            uint8_t record[sonic::kRecordHeaderBytes + FRAME_SAMPLES];
-            sonic::buildRecordHeader(record, false, frame.position);
-            memcpy(record + sonic::kRecordHeaderBytes, frame.audio, sizeof(frame.audio));
-            if (!writeAll(socket, record, sizeof(record))) break;
+            // SB01 carries raw fixed-size mu-law frames. Both old and new
+            // relays accept it; SB02 record headers would become audible noise.
+            if (!writeAll(socket, frame.audio, sizeof(frame.audio))) break;
             ++sent;
         }
-        close(socket); // Never continue a partially written record on a new session.
+        close(socket); // Never continue a partially written frame on a new session.
         discardFrames();
         ESP_LOGW(TAG, "Stream disconnected; retrying in 1s");
         pauseFor(1000);

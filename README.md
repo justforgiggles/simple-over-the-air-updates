@@ -12,13 +12,14 @@ cp firmware/include/config.example.h firmware/include/config.h
 pio run
 python3 tools/test_bundle.py
 python3 tools/test_audio.py
+python3 tools/test_download.py
 ```
 
 Edit `firmware/src/application.cpp` for your application. `applicationSetup()` runs
 once and `applicationLoop()` runs repeatedly, separately from the updater task.
 Each call must return within the 30-second watchdog period.
 The application streams an INMP441 microphone continuously to
-`sonic.barenderasmus.com:9000` over plain TCP, using Sonic Bridge's SB02 protocol:
+`sonic.barenderasmus.com:9000` over plain TCP, using Sonic Bridge's SB01 protocol (supported by old and new relays):
 16 kHz mono μ-law, 320 samples (20 ms) per frame. Silence is transmitted too.
 The relay accepts one source at a time; stop any other source before testing.
 
@@ -35,7 +36,7 @@ Wire the microphone to the **original ESP32/ESP-32U**, not an ESP32-C3:
 
 Capture and TCP transmission run in separate tasks. The 16-frame queue holds
 at most 320 ms of audio and drops oldest frames when full. Connection attempts
-have a five-second TCP deadline and each record has a one-second write deadline;
+have a five-second TCP deadline and each frame has a one-second write deadline;
 DNS uses lwIP's bounded retries. Failed connections retry after one second,
 resolve the hostname again, and discard buffered audio before resuming.
 Wi-Fi connection attempts run every five seconds independently of OTA, and audio
@@ -143,7 +144,9 @@ raw-content certificate chain. Refresh the installer roots if GitHub changes CA.
 Devices require DNS and outbound NTP (UDP 123). Fresh connections respect DNS
 cache expiry and do not pin GitHub's IP address.
 
-Network operations have 10-second timeouts, firmware downloads a 120-second
+Connection/header operations have 10-second timeouts; body reads retry temporary
+`ESP_ERR_HTTP_EAGAIN` timeouts in one-second waits while feeding the watchdog.
+Checksum downloads have a 10-second budget and firmware downloads a 120-second
 transfer budget, and stalled tasks a 30-second watchdog. Ordinary failures retry
 next cycle. GitHub/CDN caching can delay publication by several minutes. If the
 checksum and binary temporarily come from different commits, verification fails

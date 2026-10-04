@@ -1,5 +1,5 @@
 // Adapted from sonic-bridge/esp32/src/wire.h.
-// Portable SB02 framing and G.711 encoding; checked by tools/test_audio.py.
+// Portable SB01 framing and G.711 encoding; checked by tools/test_audio.py.
 
 #ifndef SONIC_WIRE_H
 #define SONIC_WIRE_H
@@ -24,7 +24,7 @@ inline size_t buildStreamHeader(uint8_t* out, CodecId codec, uint32_t sampleRate
     out[0] = 'S';
     out[1] = 'B';
     out[2] = '0';
-    out[3] = '2';
+    out[3] = '1';
     out[4] = static_cast<uint8_t>(codec);
     out[5] = 1;
     out[6] = static_cast<uint8_t>(frameSamples & 0xFF);
@@ -35,14 +35,6 @@ inline size_t buildStreamHeader(uint8_t* out, CodecId codec, uint32_t sampleRate
     out[11] = static_cast<uint8_t>((sampleRate >> 24) & 0xFF);
 
     return kHeaderBytes;
-}
-
-// SB02: one byte kind (1 audio, 2 quiet), uint64 LE sample position,
-// then exactly frameSamples mu-law bytes for audio, no payload for quiet.
-constexpr size_t kRecordHeaderBytes = 9;
-inline void buildRecordHeader(uint8_t* out, bool quiet, uint64_t position) {
-    out[0] = quiet ? 2 : 1;
-    for (int i=0; i<8; ++i) out[i+1] = static_cast<uint8_t>(position >> (8*i));
 }
 
 // ITU-T G.711 mu-law. Mirror of internal/audio/codec.go. The segment table and

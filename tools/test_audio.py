@@ -21,16 +21,13 @@ class AudioTests(unittest.TestCase):
 int main() {
     uint8_t header[sonic::kHeaderBytes];
     assert(sonic::buildStreamHeader(header, sonic::kCodecMulaw, 16000, 320) == 12);
-    const uint8_t expected[] = {'S', 'B', '0', '2', 1, 1, 0x40, 1, 0x80, 0x3e, 0, 0};
+    const uint8_t expected[] = {'S', 'B', '0', '1', 1, 1, 0x40, 1, 0x80, 0x3e, 0, 0};
     assert(memcmp(header, expected, sizeof(expected)) == 0);
-    uint8_t record[sonic::kRecordHeaderBytes];
-    // A frame-aligned position beyond 32 bits, exercising all significant bytes.
-    sonic::buildRecordHeader(record, false, 0x0001020304050640ULL);
-    const uint8_t audio[] = {1, 0x40, 6, 5, 4, 3, 2, 1, 0};
-    assert(memcmp(record, audio, sizeof(audio)) == 0);
-    sonic::buildRecordHeader(record, false, 0);
-    for (size_t i = 1; i < sizeof(record); ++i) assert(record[i] == 0);
-    assert(record[0] == 1);
+    // Continuous SB01 payload: exactly 320 mu-law bytes, no record prefix.
+    int16_t silence[320] = {};
+    uint8_t frame[320];
+    assert(sonic::encodeFrame(silence, 320, frame) == 320);
+    for (auto byte : frame) assert(byte == 0xff);
 
     assert(sonic::slotToSample(0, 14) == 0);
     assert(sonic::slotToSample(1234 * 16384, 14) == 1234);

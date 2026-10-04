@@ -228,6 +228,21 @@ struct Request {
     }
 };
 
+// A read timeout means no data is ready yet, not that the image is corrupt.
+// Keep the connection and offset; only retry EAGAIN, within the caller's budget.
+int readBody(esp_http_client_handle_t client, char* buffer, int size, uint64_t deadline) {
+    while (true) {
+        const auto now = milliseconds();
+        if (now >= deadline) return -ESP_ERR_HTTP_EAGAIN;
+        const auto remaining = deadline - now;
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
+        esp_http_client_set_timeout_ms(client, std::min<uint64_t>(1000, remaining));
+        const int count = esp_http_client_read(client, buffer, size);
+        if (count != -ESP_ERR_HTTP_EAGAIN) return count;
+        vTaskDelay(1);
+    }
+}
+
 bool fetchChecksum(char output[65]) {
     Request request;
     if (!request.open("firmware.sha256")) {
@@ -246,8 +261,8 @@ bool fetchChecksum(char output[65]) {
             OTA_ERROR("Checksum download timed out");
             return false;
         }
-        esp_http_client_set_timeout_ms(request.client, NETWORK_TIMEOUT_MS - elapsed);
-        int count = esp_http_client_read(request.client, body + received, sizeof(body) - received);
+        int count = readBody(request.client, body + received, sizeof(body) - received,
+                             start + NETWORK_TIMEOUT_MS);
         if (count <= 0) {
             OTA_ERROR("Checksum read failed (%d), received %u/65 bytes", count, static_cast<unsigned>(received));
             return false;
@@ -292,11 +307,8 @@ bool install(const char* expected) {
         if (elapsed >= DOWNLOAD_TIMEOUT_MS) {
             break;
         }
-        ESP_ERROR_CHECK(esp_task_wdt_reset());
-        esp_http_client_set_timeout_ms(request.client,
-            std::min<uint64_t>(NETWORK_TIMEOUT_MS, DOWNLOAD_TIMEOUT_MS - elapsed));
-        int count = esp_http_client_read(request.client, buffer,
-            std::min<int64_t>(sizeof(buffer), request.length - received));
+        int count = readBody(request.client, buffer,
+            std::min<int64_t>(sizeof(buffer), request.length - received), start + DOWNLOAD_TIMEOUT_MS);
         if (count <= 0) {
             OTA_ERROR("Firmware read failed (%d) after %lld/%lld bytes", count,
                       static_cast<long long>(received), static_cast<long long>(request.length));
@@ -355,6 +367,7 @@ void setup() {
     ESP_ERROR_CHECK(esp_task_wdt_add(nullptr));
     WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
     // loop() owns connection attempts; do not race an automatic reconnect.
     WiFi.setAutoReconnect(false);
 }
